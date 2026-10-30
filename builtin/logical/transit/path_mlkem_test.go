@@ -501,3 +501,65 @@ func TestTransit_MLKEMDatakeyRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestTransit_MLKEMRewrap covers encrypt → rotate → rewrap → decrypt, then
+// min_decryption_version gating of the original v1 ciphertext.
+func TestTransit_MLKEMRewrap(t *testing.T) {
+	mlkemEnableFlag(t)
+
+	for _, keyType := range []string{"ml-kem-768", "ml-kem-1024"} {
+		t.Run(keyType, func(t *testing.T) {
+			b, storage := createBackendWithStorage(t)
+			mlkemCreate(t, b, storage, "rw", keyType, nil)
+
+			ptB64 := base64.StdEncoding.EncodeToString([]byte("rewrap-me"))
+			ctV1 := mlkemEncrypt(t, b, storage, "rw", ptB64)
+			require.True(t, strings.HasPrefix(ctV1, "vault:v1:"))
+
+			rotResp, err := b.HandleRequest(context.Background(), &logical.Request{
+				Path:      "keys/rw/rotate",
+				Operation: logical.UpdateOperation,
+				Storage:   storage,
+			})
+			require.NoError(t, err)
+			require.False(t, rotResp != nil && rotResp.IsError(), "rotate: %#v", rotResp)
+
+			rewrapResp, err := b.HandleRequest(context.Background(), &logical.Request{
+				Path:      "rewrap/rw",
+				Operation: logical.UpdateOperation,
+				Storage:   storage,
+				Data:      map[string]interface{}{"ciphertext": ctV1},
+			})
+			require.NoError(t, err)
+			require.False(t, rewrapResp != nil && rewrapResp.IsError(), "rewrap: %#v", rewrapResp)
+			ctV2, ok := rewrapResp.Data["ciphertext"].(string)
+			require.True(t, ok)
+			require.True(t, strings.HasPrefix(ctV2, "vault:v2:"))
+			require.Equal(t, ptB64, mlkemDecrypt(t, b, storage, "rw", ctV2))
+
+			cfgResp, err := b.HandleRequest(context.Background(), &logical.Request{
+				Path:      "keys/rw/config",
+				Operation: logical.UpdateOperation,
+				Storage:   storage,
+				Data:      map[string]interface{}{"min_decryption_version": 2},
+			})
+			require.NoError(t, err)
+			require.False(t, cfgResp != nil && cfgResp.IsError(), "config: %#v", cfgResp)
+
+			v1Resp, v1Err := b.HandleRequest(context.Background(), &logical.Request{
+				Path:      "decrypt/rw",
+				Operation: logical.UpdateOperation,
+				Storage:   storage,
+				Data:      map[string]interface{}{"ciphertext": ctV1},
+			})
+			require.Error(t, v1Err)
+			require.True(t, v1Resp == nil || v1Resp.IsError() || v1Err != nil)
+			if v1Resp != nil {
+				_, hasPT := v1Resp.Data["plaintext"]
+				require.False(t, hasPT)
+			}
+
+			require.Equal(t, ptB64, mlkemDecrypt(t, b, storage, "rw", ctV2))
+		})
+	}
+}
