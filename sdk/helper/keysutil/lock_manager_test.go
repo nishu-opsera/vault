@@ -114,3 +114,70 @@ func TestRestorePolicy_NilPolicy(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "backup data does not contain a valid policy")
 }
+
+// TestGetPolicy_MLKEMDerivedConvergentRejection verifies GetPolicy rejects
+// derived/convergent for ML-KEM types and allows plain upsert with a public key.
+func TestGetPolicy_MLKEMDerivedConvergentRejection(t *testing.T) {
+	t.Parallel()
+
+	keyTypes := []KeyType{KeyType_ML_KEM_768, KeyType_ML_KEM_1024}
+
+	for _, keyType := range keyTypes {
+		t.Run(keyType.String()+"/derived", func(t *testing.T) {
+			t.Parallel()
+			lm, err := NewLockManager(false, 0)
+			require.NoError(t, err)
+			storage := &logical.InmemStorage{}
+
+			_, _, err = lm.GetPolicy(context.Background(), PolicyRequest{
+				Upsert:  true,
+				Storage: storage,
+				KeyType: keyType,
+				Name:    "mlkem-derived",
+				Derived: true,
+			}, rand.Reader)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "key derivation and convergent encryption not supported")
+		})
+
+		t.Run(keyType.String()+"/convergent", func(t *testing.T) {
+			t.Parallel()
+			lm, err := NewLockManager(false, 0)
+			require.NoError(t, err)
+			storage := &logical.InmemStorage{}
+
+			_, _, err = lm.GetPolicy(context.Background(), PolicyRequest{
+				Upsert:     true,
+				Storage:    storage,
+				KeyType:    keyType,
+				Name:       "mlkem-convergent",
+				Convergent: true,
+			}, rand.Reader)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "key derivation and convergent encryption not supported")
+		})
+
+		t.Run(keyType.String()+"/plain", func(t *testing.T) {
+			t.Parallel()
+			lm, err := NewLockManager(false, 0)
+			require.NoError(t, err)
+			storage := &logical.InmemStorage{}
+
+			p, upserted, err := lm.GetPolicy(context.Background(), PolicyRequest{
+				Upsert:  true,
+				Storage: storage,
+				KeyType: keyType,
+				Name:    "mlkem-plain",
+			}, rand.Reader)
+			require.NoError(t, err)
+			require.True(t, upserted)
+			require.NotNil(t, p)
+			defer p.Unlock()
+
+			require.Equal(t, 1, p.LatestVersion)
+			entry, ok := p.Keys["1"]
+			require.True(t, ok)
+			require.NotEmpty(t, entry.FormattedPublicKey)
+		})
+	}
+}
