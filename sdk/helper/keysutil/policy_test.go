@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -1419,6 +1420,74 @@ func TestPolicy_RotateInMemoryWithAlgorithmRejectsUsageChanges(t *testing.T) {
 	require.Equal(t, 1, p.LatestVersion)
 	_, ok := p.Keys["2"]
 	require.False(t, ok, "new key version should not be created after a rejected algorithm change")
+}
+
+// TestPolicy_MLKEMKeyGeneration verifies ML-KEM-768/1024 key pair generation via
+// RotateInMemoryWithAlgorithm: version increments, private seed is restorable, and
+// FormattedPublicKey is base64-encoded encapsulation key material of the expected size.
+func TestPolicy_MLKEMKeyGeneration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		keyType    KeyType
+		wantPubLen int
+	}{
+		{KeyType_ML_KEM_768, mlkem.EncapsulationKeySize768},
+		{KeyType_ML_KEM_1024, mlkem.EncapsulationKeySize1024},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.keyType.String(), func(t *testing.T) {
+			p := &Policy{Type: tt.keyType}
+
+			err := p.RotateInMemoryWithAlgorithm(rand.Reader, tt.keyType, nil)
+			require.NoError(t, err)
+			require.Equal(t, 1, p.LatestVersion)
+
+			entry, ok := p.Keys["1"]
+			require.True(t, ok)
+			require.NotEmpty(t, entry.Key)
+
+			pub, err := base64.StdEncoding.DecodeString(entry.FormattedPublicKey)
+			require.NoError(t, err)
+			require.Len(t, pub, tt.wantPubLen)
+
+			switch tt.keyType {
+			case KeyType_ML_KEM_768:
+				dk, err := mlkem.NewDecapsulationKey768(entry.Key)
+				require.NoError(t, err)
+				require.Equal(t, pub, dk.EncapsulationKey().Bytes())
+			case KeyType_ML_KEM_1024:
+				dk, err := mlkem.NewDecapsulationKey1024(entry.Key)
+				require.NoError(t, err)
+				require.Equal(t, pub, dk.EncapsulationKey().Bytes())
+			}
+
+			err = p.RotateInMemoryWithAlgorithm(rand.Reader, tt.keyType, nil)
+			require.NoError(t, err)
+			require.Equal(t, 2, p.LatestVersion)
+
+			entry2, ok := p.Keys["2"]
+			require.True(t, ok)
+			require.NotEmpty(t, entry2.Key)
+			require.NotEqual(t, entry.Key, entry2.Key)
+
+			pub2, err := base64.StdEncoding.DecodeString(entry2.FormattedPublicKey)
+			require.NoError(t, err)
+			require.Len(t, pub2, tt.wantPubLen)
+
+			switch tt.keyType {
+			case KeyType_ML_KEM_768:
+				dk, err := mlkem.NewDecapsulationKey768(entry2.Key)
+				require.NoError(t, err)
+				require.Equal(t, pub2, dk.EncapsulationKey().Bytes())
+			case KeyType_ML_KEM_1024:
+				dk, err := mlkem.NewDecapsulationKey1024(entry2.Key)
+				require.NoError(t, err)
+				require.Equal(t, pub2, dk.EncapsulationKey().Bytes())
+			}
+		})
+	}
 }
 
 // TestIsCompatibleKeyType verifies that isCompatibleKeyType allows algorithm

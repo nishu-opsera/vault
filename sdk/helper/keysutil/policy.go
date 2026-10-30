@@ -13,6 +13,7 @@ import (
 	stdlibEd25519 "crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -2005,6 +2006,27 @@ func (p *Policy) RotateInMemoryWithAlgorithm(randReader io.Reader, keyType KeyTy
 		}
 
 		entry.RSAPublicKey = entry.RSAKey.Public().(*rsa.PublicKey)
+
+	case KeyType_ML_KEM_768, KeyType_ML_KEM_1024:
+		var seed, pub []byte
+		switch keyType {
+		case KeyType_ML_KEM_768:
+			dk, genErr := mlkem.GenerateKey768()
+			if genErr != nil {
+				return errutil.InternalError{Err: fmt.Sprintf("error generating ML-KEM-768 key: %v", genErr)}
+			}
+			seed = dk.Bytes()
+			pub = dk.EncapsulationKey().Bytes()
+		case KeyType_ML_KEM_1024:
+			dk, genErr := mlkem.GenerateKey1024()
+			if genErr != nil {
+				return errutil.InternalError{Err: fmt.Sprintf("error generating ML-KEM-1024 key: %v", genErr)}
+			}
+			seed = dk.Bytes()
+			pub = dk.EncapsulationKey().Bytes()
+		}
+		entry.Key = seed
+		entry.FormattedPublicKey = base64.StdEncoding.EncodeToString(pub)
 
 	default:
 		if err := entRotateInMemory(p, keyType, &entry, randReader, config); err != nil {
