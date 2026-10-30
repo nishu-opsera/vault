@@ -12,6 +12,7 @@ import (
 	"crypto/ecdsa"
 	stdlibEd25519 "crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/mlkem"
 	"crypto/rand"
@@ -47,7 +48,7 @@ import (
 	"github.com/tink-crypto/tink-go/v2/kwp/subtle"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/ed25519"
-	"golang.org/x/crypto/hkdf"
+	xhkdf "golang.org/x/crypto/hkdf"
 )
 
 // Careful with iota; don't put anything before it in this const block because
@@ -112,6 +113,9 @@ const (
 
 	// DefaultVersionTemplate is used when no version template is provided.
 	DefaultVersionTemplate = "vault:v{{version}}:"
+
+	// mlkemTransitHKDFInfo is the HKDF info label for Transit ML-KEM CEK derivation.
+	mlkemTransitHKDFInfo = "vault-transit-mlkem-v1"
 )
 
 type PaddingScheme string
@@ -1032,7 +1036,7 @@ func (p *Policy) DeriveKey(context, salt []byte, ver int, numBytes int) ([]byte,
 		return kdf.CounterMode(prf, prfLen, keyEntry.Key, append(context, salt...), 256)
 
 	case Kdf_hkdf_sha256:
-		reader := hkdf.New(sha256.New, keyEntry.Key, salt, context)
+		reader := xhkdf.New(sha256.New, keyEntry.Key, salt, context)
 		derBytes := bytes.NewBuffer(nil)
 		derBytes.Grow(numBytes)
 		limReader := &io.LimitedReader{
@@ -1245,6 +1249,60 @@ func (p *Policy) DecryptWithOptions(opts EncryptionOptions, value string, factor
 		if err != nil {
 			return "", errutil.InternalError{Err: fmt.Sprintf("failed to RSA decrypt the ciphertext: %v", err)}
 		}
+	case KeyType_ML_KEM_768, KeyType_ML_KEM_1024:
+		keyEntry, err := p.safeGetKeyEntry(ver)
+		if err != nil {
+			return "", err
+		}
+
+		kemSize := mlkem.CiphertextSize768
+		if p.KeyVersionType(ver) == KeyType_ML_KEM_1024 {
+			kemSize = mlkem.CiphertextSize1024
+		}
+		if len(decoded) < kemSize+12+16 {
+			return "", errutil.UserError{Err: "invalid ciphertext: too short"}
+		}
+
+		kemCT := decoded[:kemSize]
+		nonce := decoded[kemSize : kemSize+12]
+		dataCT := decoded[kemSize+12:]
+
+		var sharedKey []byte
+		switch p.KeyVersionType(ver) {
+		case KeyType_ML_KEM_768:
+			dk, loadErr := mlkem.NewDecapsulationKey768(keyEntry.Key)
+			if loadErr != nil {
+				return "", errutil.InternalError{Err: fmt.Sprintf("failed to load ML-KEM-768 key: %v", loadErr)}
+			}
+			sharedKey, err = dk.Decapsulate(kemCT)
+		case KeyType_ML_KEM_1024:
+			dk, loadErr := mlkem.NewDecapsulationKey1024(keyEntry.Key)
+			if loadErr != nil {
+				return "", errutil.InternalError{Err: fmt.Sprintf("failed to load ML-KEM-1024 key: %v", loadErr)}
+			}
+			sharedKey, err = dk.Decapsulate(kemCT)
+		}
+		if err != nil {
+			return "", errutil.UserError{Err: "invalid ciphertext: unable to decrypt"}
+		}
+
+		cek, err := hkdf.Key(sha256.New, sharedKey, nil, mlkemTransitHKDFInfo, 32)
+		if err != nil {
+			return "", errutil.InternalError{Err: fmt.Sprintf("failed to derive ML-KEM content encryption key: %v", err)}
+		}
+		block, err := aes.NewCipher(cek)
+		if err != nil {
+			return "", errutil.InternalError{Err: fmt.Sprintf("failed to create AES cipher for ML-KEM decrypt: %v", err)}
+		}
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			return "", errutil.InternalError{Err: fmt.Sprintf("failed to create GCM for ML-KEM decrypt: %v", err)}
+		}
+		plain, err = gcm.Open(nil, nonce, dataCT, nil)
+		if err != nil {
+			return "", errutil.UserError{Err: "invalid ciphertext: unable to decrypt"}
+		}
+
 	case KeyType_MANAGED_KEY:
 		keyEntry, err := p.safeGetKeyEntry(ver)
 		if err != nil {
@@ -2430,6 +2488,50 @@ func (p *Policy) EncryptWithOptions(opts EncryptionOptions, value string, factor
 		if err != nil {
 			return "", errutil.InternalError{Err: fmt.Sprintf("failed to RSA encrypt the plaintext: %v", err)}
 		}
+	case KeyType_ML_KEM_768, KeyType_ML_KEM_1024:
+		keyEntry, err := p.safeGetKeyEntry(opts.KeyVersion)
+		if err != nil {
+			return "", err
+		}
+
+		var sharedKey, kemCT []byte
+		switch p.KeyVersionType(opts.KeyVersion) {
+		case KeyType_ML_KEM_768:
+			dk, loadErr := mlkem.NewDecapsulationKey768(keyEntry.Key)
+			if loadErr != nil {
+				return "", errutil.InternalError{Err: fmt.Sprintf("failed to load ML-KEM-768 key: %v", loadErr)}
+			}
+			sharedKey, kemCT = dk.EncapsulationKey().Encapsulate()
+		case KeyType_ML_KEM_1024:
+			dk, loadErr := mlkem.NewDecapsulationKey1024(keyEntry.Key)
+			if loadErr != nil {
+				return "", errutil.InternalError{Err: fmt.Sprintf("failed to load ML-KEM-1024 key: %v", loadErr)}
+			}
+			sharedKey, kemCT = dk.EncapsulationKey().Encapsulate()
+		}
+
+		cek, err := hkdf.Key(sha256.New, sharedKey, nil, mlkemTransitHKDFInfo, 32)
+		if err != nil {
+			return "", errutil.InternalError{Err: fmt.Sprintf("failed to derive ML-KEM content encryption key: %v", err)}
+		}
+		block, err := aes.NewCipher(cek)
+		if err != nil {
+			return "", errutil.InternalError{Err: fmt.Sprintf("failed to create AES cipher for ML-KEM encrypt: %v", err)}
+		}
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			return "", errutil.InternalError{Err: fmt.Sprintf("failed to create GCM for ML-KEM encrypt: %v", err)}
+		}
+		nonce := make([]byte, 12)
+		if _, err := rand.Read(nonce); err != nil {
+			return "", errutil.InternalError{Err: fmt.Sprintf("failed to generate ML-KEM nonce: %v", err)}
+		}
+		sealed := gcm.Seal(nil, nonce, plaintext, nil)
+		ciphertext = make([]byte, 0, len(kemCT)+len(nonce)+len(sealed))
+		ciphertext = append(ciphertext, kemCT...)
+		ciphertext = append(ciphertext, nonce...)
+		ciphertext = append(ciphertext, sealed...)
+
 	case KeyType_MANAGED_KEY:
 		keyEntry, err := p.safeGetKeyEntry(opts.KeyVersion)
 		if err != nil {

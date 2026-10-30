@@ -1490,6 +1490,121 @@ func TestPolicy_MLKEMKeyGeneration(t *testing.T) {
 	}
 }
 
+// TestPolicy_MLKEMEncryptDecrypt covers ML-KEM Transit encrypt/decrypt round-trips
+// and negative cases (wrong key, tampered regions, truncated ciphertext).
+func TestPolicy_MLKEMEncryptDecrypt(t *testing.T) {
+	t.Parallel()
+
+	keyTypes := []KeyType{KeyType_ML_KEM_768, KeyType_ML_KEM_1024}
+	plaintexts := map[string][]byte{
+		"empty": {},
+		"short": []byte("hi"),
+		"1KB":   bytes.Repeat([]byte("a"), 1024),
+	}
+
+	requireUserError := func(t *testing.T, err error) {
+		t.Helper()
+		require.Error(t, err)
+		var ue errutil.UserError
+		require.ErrorAs(t, err, &ue)
+	}
+
+	flipByte := func(ct string, offset int) string {
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ct, "vault:v1:"))
+		require.NoError(t, err)
+		require.Greater(t, len(raw), offset)
+		raw[offset] ^= 0x01
+		return "vault:v1:" + base64.StdEncoding.EncodeToString(raw)
+	}
+
+	truncateCT := func(ct string, keep int) string {
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ct, "vault:v1:"))
+		require.NoError(t, err)
+		require.Greater(t, len(raw), keep)
+		return "vault:v1:" + base64.StdEncoding.EncodeToString(raw[:keep])
+	}
+
+	for _, keyType := range keyTypes {
+		t.Run(keyType.String(), func(t *testing.T) {
+			t.Parallel()
+
+			p := &Policy{Type: keyType}
+			require.NoError(t, p.RotateInMemoryWithAlgorithm(rand.Reader, keyType, nil))
+
+			kemSize := mlkem.CiphertextSize768
+			if keyType == KeyType_ML_KEM_1024 {
+				kemSize = mlkem.CiphertextSize1024
+			}
+
+			for name, pt := range plaintexts {
+				t.Run("roundtrip/"+name, func(t *testing.T) {
+					encodedPT := base64.StdEncoding.EncodeToString(pt)
+					ct, err := p.EncryptWithOptions(EncryptionOptions{}, encodedPT)
+					require.NoError(t, err)
+					require.True(t, strings.HasPrefix(ct, "vault:v1:"))
+
+					gotB64, err := p.DecryptWithOptions(EncryptionOptions{}, ct)
+					require.NoError(t, err)
+					got, err := base64.StdEncoding.DecodeString(gotB64)
+					require.NoError(t, err)
+					require.Equal(t, pt, got)
+				})
+			}
+
+			t.Run("nondeterministic", func(t *testing.T) {
+				encodedPT := base64.StdEncoding.EncodeToString([]byte("same-plaintext"))
+				ct1, err := p.EncryptWithOptions(EncryptionOptions{}, encodedPT)
+				require.NoError(t, err)
+				ct2, err := p.EncryptWithOptions(EncryptionOptions{}, encodedPT)
+				require.NoError(t, err)
+				require.True(t, strings.HasPrefix(ct1, "vault:v1:"))
+				require.True(t, strings.HasPrefix(ct2, "vault:v1:"))
+				require.NotEqual(t, ct1, ct2)
+			})
+
+			t.Run("wrong_key", func(t *testing.T) {
+				encodedPT := base64.StdEncoding.EncodeToString([]byte("secret"))
+				ct, err := p.EncryptWithOptions(EncryptionOptions{}, encodedPT)
+				require.NoError(t, err)
+
+				other := &Policy{Type: keyType}
+				require.NoError(t, other.RotateInMemoryWithAlgorithm(rand.Reader, keyType, nil))
+				_, err = other.DecryptWithOptions(EncryptionOptions{}, ct)
+				requireUserError(t, err)
+			})
+
+			t.Run("tampered_kem", func(t *testing.T) {
+				ct, err := p.EncryptWithOptions(EncryptionOptions{}, base64.StdEncoding.EncodeToString([]byte("x")))
+				require.NoError(t, err)
+				_, err = p.DecryptWithOptions(EncryptionOptions{}, flipByte(ct, 0))
+				requireUserError(t, err)
+			})
+
+			t.Run("tampered_nonce", func(t *testing.T) {
+				ct, err := p.EncryptWithOptions(EncryptionOptions{}, base64.StdEncoding.EncodeToString([]byte("x")))
+				require.NoError(t, err)
+				_, err = p.DecryptWithOptions(EncryptionOptions{}, flipByte(ct, kemSize))
+				requireUserError(t, err)
+			})
+
+			t.Run("tampered_data", func(t *testing.T) {
+				ct, err := p.EncryptWithOptions(EncryptionOptions{}, base64.StdEncoding.EncodeToString([]byte("x")))
+				require.NoError(t, err)
+				_, err = p.DecryptWithOptions(EncryptionOptions{}, flipByte(ct, kemSize+12))
+				requireUserError(t, err)
+			})
+
+			t.Run("truncated", func(t *testing.T) {
+				ct, err := p.EncryptWithOptions(EncryptionOptions{}, base64.StdEncoding.EncodeToString([]byte("x")))
+				require.NoError(t, err)
+				_, err = p.DecryptWithOptions(EncryptionOptions{}, truncateCT(ct, kemSize+12+8))
+				requireUserError(t, err)
+				require.Contains(t, err.Error(), "too short")
+			})
+		})
+	}
+}
+
 // TestIsCompatibleKeyType verifies that isCompatibleKeyType allows algorithm
 // changes that preserve key usage, rejects changes that alter key usage, allows
 // any transition to or from MANAGED_KEY, and blocks algorithm changes away from
