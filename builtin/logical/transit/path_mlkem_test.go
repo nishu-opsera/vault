@@ -563,3 +563,37 @@ func TestTransit_MLKEMRewrap(t *testing.T) {
 		})
 	}
 }
+
+// TestTransit_MLKEMExportRejection verifies export of encryption-key and
+// public-key fails with "unknown key type" for exportable ML-KEM keys.
+func TestTransit_MLKEMExportRejection(t *testing.T) {
+	mlkemEnableFlag(t)
+
+	for _, keyType := range []string{"ml-kem-768", "ml-kem-1024"} {
+		t.Run(keyType, func(t *testing.T) {
+			b, storage := createBackendWithStorage(t)
+			mlkemCreate(t, b, storage, "exp", keyType, map[string]interface{}{
+				"exportable": true,
+			})
+
+			for _, exportPath := range []string{"export/encryption-key/exp", "export/public-key/exp"} {
+				t.Run(exportPath, func(t *testing.T) {
+					resp, err := b.HandleRequest(context.Background(), &logical.Request{
+						Path:      exportPath,
+						Operation: logical.ReadOperation,
+						Storage:   storage,
+					})
+					msg := ""
+					if err != nil {
+						msg = err.Error()
+					}
+					if resp != nil && resp.IsError() {
+						msg = resp.Error().Error()
+					}
+					require.NotEmpty(t, msg)
+					require.Contains(t, msg, "unknown key type")
+				})
+			}
+		})
+	}
+}
