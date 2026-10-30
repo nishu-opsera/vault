@@ -6,8 +6,11 @@ package transit
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"testing"
+	"time"
 
+	"github.com/hashicorp/vault/sdk/helper/keysutil"
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/stretchr/testify/require"
 )
@@ -84,4 +87,171 @@ func TestTransit_MLKEMSanity(t *testing.T) {
 	require.NotNil(t, resp)
 	require.False(t, resp.IsError(), "decrypt: %#v", resp)
 	require.Equal(t, plaintext, resp.Data["plaintext"])
+}
+
+// TestTransit_MLKEMFeatureFlag covers VAULT_TRANSIT_ENABLE_MLKEM create gating and
+// that existing ML-KEM keys keep working (encrypt/decrypt/rotate/auto-rotate) when
+// the flag is later unset.
+func TestTransit_MLKEMFeatureFlag(t *testing.T) {
+	createKey := func(t *testing.T, b *backend, storage logical.Storage, name, keyType string) (*logical.Response, error) {
+		t.Helper()
+		return b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "keys/" + name,
+			Operation: logical.UpdateOperation,
+			Storage:   storage,
+			Data: map[string]interface{}{
+				"type": keyType,
+			},
+		})
+	}
+
+	readKey := func(t *testing.T, b *backend, storage logical.Storage, name string) (*logical.Response, error) {
+		t.Helper()
+		return b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "keys/" + name,
+			Operation: logical.ReadOperation,
+			Storage:   storage,
+		})
+	}
+
+	errorText := func(resp *logical.Response, err error) string {
+		if resp != nil && resp.IsError() {
+			return resp.Error().Error()
+		}
+		if err != nil {
+			return err.Error()
+		}
+		return ""
+	}
+
+	t.Run("flag_values", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			flagValue  string
+			expectFail bool
+		}{
+			{name: "true", flagValue: "true", expectFail: false},
+			{name: "empty", flagValue: "", expectFail: true},
+			{name: "false", flagValue: "false", expectFail: true},
+			{name: "foo", flagValue: "foo", expectFail: true},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Setenv(envTransitEnableMLKEM, tc.flagValue)
+				b, storage := createBackendWithStorage(t)
+
+				for _, keyType := range []string{"ml-kem-768", "ml-kem-1024"} {
+					name := fmt.Sprintf("mlkem-%s-%s", tc.name, keyType)
+					resp, err := createKey(t, b, storage, name, keyType)
+					if !tc.expectFail {
+						require.NoError(t, err)
+						require.False(t, resp != nil && resp.IsError(), "create %s: %#v", keyType, resp)
+						continue
+					}
+
+					msg := errorText(resp, err)
+					require.Contains(t, msg, "ML-KEM key types are not enabled")
+
+					readResp, readErr := readKey(t, b, storage, name)
+					require.NoError(t, readErr)
+					require.Nil(t, readResp)
+				}
+			})
+		}
+	})
+
+	t.Run("flag_off_existing_key_ops", func(t *testing.T) {
+		b, storage := createBackendWithStorage(t)
+
+		t.Setenv(envTransitEnableMLKEM, "true")
+		resp, err := createKey(t, b, storage, "existing", "ml-kem-768")
+		require.NoError(t, err)
+		require.False(t, resp != nil && resp.IsError(), "create: %#v", resp)
+
+		pt1 := base64.StdEncoding.EncodeToString([]byte("first-plaintext"))
+		encResp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "encrypt/existing",
+			Operation: logical.UpdateOperation,
+			Storage:   storage,
+			Data:      map[string]interface{}{"plaintext": pt1},
+		})
+		require.NoError(t, err)
+		require.False(t, encResp != nil && encResp.IsError(), "encrypt: %#v", encResp)
+		ct1 := encResp.Data["ciphertext"].(string)
+
+		t.Setenv(envTransitEnableMLKEM, "")
+
+		decResp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "decrypt/existing",
+			Operation: logical.UpdateOperation,
+			Storage:   storage,
+			Data:      map[string]interface{}{"ciphertext": ct1},
+		})
+		require.NoError(t, err)
+		require.False(t, decResp != nil && decResp.IsError(), "decrypt ct1: %#v", decResp)
+		require.Equal(t, pt1, decResp.Data["plaintext"])
+
+		pt2 := base64.StdEncoding.EncodeToString([]byte("second-plaintext"))
+		encResp2, err := b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "encrypt/existing",
+			Operation: logical.UpdateOperation,
+			Storage:   storage,
+			Data:      map[string]interface{}{"plaintext": pt2},
+		})
+		require.NoError(t, err)
+		require.False(t, encResp2 != nil && encResp2.IsError(), "encrypt pt2: %#v", encResp2)
+		ct2 := encResp2.Data["ciphertext"].(string)
+
+		decResp2, err := b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "decrypt/existing",
+			Operation: logical.UpdateOperation,
+			Storage:   storage,
+			Data:      map[string]interface{}{"ciphertext": ct2},
+		})
+		require.NoError(t, err)
+		require.False(t, decResp2 != nil && decResp2.IsError(), "decrypt ct2: %#v", decResp2)
+		require.Equal(t, pt2, decResp2.Data["plaintext"])
+
+		rotResp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "keys/existing/rotate",
+			Operation: logical.UpdateOperation,
+			Storage:   storage,
+		})
+		require.NoError(t, err)
+		require.False(t, rotResp != nil && rotResp.IsError(), "rotate: %#v", rotResp)
+
+		readResp, err := readKey(t, b, storage, "existing")
+		require.NoError(t, err)
+		require.NotNil(t, readResp)
+		require.Equal(t, 2, readResp.Data["latest_version"])
+
+		p, _, err := b.GetPolicy(context.Background(), keysutil.PolicyRequest{
+			Storage: storage,
+			Name:    "existing",
+		}, b.GetRandomReader())
+		require.NoError(t, err)
+		require.NotNil(t, p)
+		p.AutoRotatePeriod = time.Nanosecond
+		require.NoError(t, p.Persist(context.Background(), storage))
+		p.Unlock()
+
+		b.checkAutoRotateAfter = time.Now()
+		require.NoError(t, b.autoRotateKeys(context.Background(), &logical.Request{Storage: storage}))
+
+		readResp, err = readKey(t, b, storage, "existing")
+		require.NoError(t, err)
+		require.NotNil(t, readResp)
+		require.Equal(t, 3, readResp.Data["latest_version"])
+
+		failResp, failErr := createKey(t, b, storage, "new-mlkem", "ml-kem-768")
+		require.Contains(t, errorText(failResp, failErr), "ML-KEM key types are not enabled")
+		absent, err := readKey(t, b, storage, "new-mlkem")
+		require.NoError(t, err)
+		require.Nil(t, absent)
+
+		aesResp, err := createKey(t, b, storage, "aes-ok", "aes256-gcm96")
+		require.NoError(t, err)
+		require.False(t, aesResp != nil && aesResp.IsError(), "aes create: %#v", aesResp)
+	})
 }
