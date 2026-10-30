@@ -448,3 +448,56 @@ func TestTransit_MLKEMDecryptFailures(t *testing.T) {
 		})
 	}
 }
+
+// TestTransit_MLKEMDatakeyRoundTrip covers datakey/plaintext and datakey/wrapped
+// for bits 128/256/512 with both ML-KEM types.
+func TestTransit_MLKEMDatakeyRoundTrip(t *testing.T) {
+	mlkemEnableFlag(t)
+
+	for _, keyType := range []string{"ml-kem-768", "ml-kem-1024"} {
+		t.Run(keyType, func(t *testing.T) {
+			b, storage := createBackendWithStorage(t)
+			mlkemCreate(t, b, storage, "dk", keyType, nil)
+
+			for _, bits := range []int{128, 256, 512} {
+				t.Run(fmt.Sprintf("plaintext/%d", bits), func(t *testing.T) {
+					resp, err := b.HandleRequest(context.Background(), &logical.Request{
+						Path:      "datakey/plaintext/dk",
+						Operation: logical.UpdateOperation,
+						Storage:   storage,
+						Data:      map[string]interface{}{"bits": bits},
+					})
+					require.NoError(t, err)
+					require.False(t, resp != nil && resp.IsError(), "datakey plaintext: %#v", resp)
+					ptB64, ok := resp.Data["plaintext"].(string)
+					require.True(t, ok)
+					ct, ok := resp.Data["ciphertext"].(string)
+					require.True(t, ok)
+					raw, err := base64.StdEncoding.DecodeString(ptB64)
+					require.NoError(t, err)
+					require.Len(t, raw, bits/8)
+					require.Equal(t, ptB64, mlkemDecrypt(t, b, storage, "dk", ct))
+				})
+
+				t.Run(fmt.Sprintf("wrapped/%d", bits), func(t *testing.T) {
+					resp, err := b.HandleRequest(context.Background(), &logical.Request{
+						Path:      "datakey/wrapped/dk",
+						Operation: logical.UpdateOperation,
+						Storage:   storage,
+						Data:      map[string]interface{}{"bits": bits},
+					})
+					require.NoError(t, err)
+					require.False(t, resp != nil && resp.IsError(), "datakey wrapped: %#v", resp)
+					_, hasPT := resp.Data["plaintext"]
+					require.False(t, hasPT)
+					ct, ok := resp.Data["ciphertext"].(string)
+					require.True(t, ok)
+					ptB64 := mlkemDecrypt(t, b, storage, "dk", ct)
+					raw, err := base64.StdEncoding.DecodeString(ptB64)
+					require.NoError(t, err)
+					require.Len(t, raw, bits/8)
+				})
+			}
+		})
+	}
+}
