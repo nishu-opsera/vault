@@ -385,3 +385,66 @@ func bytesRepeat(b byte, n int) []byte {
 	}
 	return out
 }
+
+// TestTransit_MLKEMDecryptFailures verifies wrong-key, tampered regions,
+// truncated, and garbage ciphertext return ErrInvalidRequest with no plaintext.
+func TestTransit_MLKEMDecryptFailures(t *testing.T) {
+	mlkemEnableFlag(t)
+
+	assertInvalidDecrypt := func(t *testing.T, b *backend, storage logical.Storage, name, ciphertext string) {
+		t.Helper()
+		resp, err := b.HandleRequest(context.Background(), &logical.Request{
+			Path:      "decrypt/" + name,
+			Operation: logical.UpdateOperation,
+			Storage:   storage,
+			Data:      map[string]interface{}{"ciphertext": ciphertext},
+		})
+		require.ErrorIs(t, err, logical.ErrInvalidRequest)
+		require.NotNil(t, resp)
+		require.True(t, resp.IsError())
+		_, hasPT := resp.Data["plaintext"]
+		require.False(t, hasPT)
+	}
+
+	flipCTByte := func(ct string, offset int) string {
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ct, "vault:v1:"))
+		require.NoError(t, err)
+		require.Greater(t, len(raw), offset)
+		raw[offset] ^= 0x01
+		return "vault:v1:" + base64.StdEncoding.EncodeToString(raw)
+	}
+
+	for _, keyType := range []string{"ml-kem-768", "ml-kem-1024"} {
+		t.Run(keyType, func(t *testing.T) {
+			b, storage := createBackendWithStorage(t)
+			mlkemCreate(t, b, storage, "good", keyType, nil)
+			mlkemCreate(t, b, storage, "other", keyType, nil)
+
+			ptB64 := base64.StdEncoding.EncodeToString([]byte("secret"))
+			ct := mlkemEncrypt(t, b, storage, "good", ptB64)
+			kemSize := mlkemKemSize(keyType)
+
+			t.Run("wrong_key", func(t *testing.T) {
+				assertInvalidDecrypt(t, b, storage, "other", ct)
+			})
+			t.Run("tampered_kem", func(t *testing.T) {
+				assertInvalidDecrypt(t, b, storage, "good", flipCTByte(ct, 0))
+			})
+			t.Run("tampered_nonce", func(t *testing.T) {
+				assertInvalidDecrypt(t, b, storage, "good", flipCTByte(ct, kemSize))
+			})
+			t.Run("tampered_data", func(t *testing.T) {
+				assertInvalidDecrypt(t, b, storage, "good", flipCTByte(ct, kemSize+12))
+			})
+			t.Run("truncated", func(t *testing.T) {
+				raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(ct, "vault:v1:"))
+				require.NoError(t, err)
+				short := "vault:v1:" + base64.StdEncoding.EncodeToString(raw[:kemSize+12+8])
+				assertInvalidDecrypt(t, b, storage, "good", short)
+			})
+			t.Run("garbage", func(t *testing.T) {
+				assertInvalidDecrypt(t, b, storage, "good", "vault:v1:!!!not-base64!!!")
+			})
+		})
+	}
+}
