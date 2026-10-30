@@ -5,8 +5,10 @@ package transit
 
 import (
 	"context"
+	"crypto/mlkem"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,65 @@ import (
 	"github.com/hashicorp/vault/sdk/logical"
 	"github.com/stretchr/testify/require"
 )
+
+func mlkemEnableFlag(t *testing.T) {
+	t.Helper()
+	t.Setenv(envTransitEnableMLKEM, "true")
+}
+
+func mlkemCreate(t *testing.T, b *backend, storage logical.Storage, name, keyType string, data map[string]interface{}) {
+	t.Helper()
+	if data == nil {
+		data = map[string]interface{}{}
+	}
+	data["type"] = keyType
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Path:      "keys/" + name,
+		Operation: logical.UpdateOperation,
+		Storage:   storage,
+		Data:      data,
+	})
+	require.NoError(t, err)
+	require.False(t, resp != nil && resp.IsError(), "create %s: %#v", name, resp)
+}
+
+func mlkemEncrypt(t *testing.T, b *backend, storage logical.Storage, name, plaintextB64 string) string {
+	t.Helper()
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Path:      "encrypt/" + name,
+		Operation: logical.UpdateOperation,
+		Storage:   storage,
+		Data:      map[string]interface{}{"plaintext": plaintextB64},
+	})
+	require.NoError(t, err)
+	require.False(t, resp != nil && resp.IsError(), "encrypt: %#v", resp)
+	ct, ok := resp.Data["ciphertext"].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, ct)
+	return ct
+}
+
+func mlkemDecrypt(t *testing.T, b *backend, storage logical.Storage, name, ciphertext string) string {
+	t.Helper()
+	resp, err := b.HandleRequest(context.Background(), &logical.Request{
+		Path:      "decrypt/" + name,
+		Operation: logical.UpdateOperation,
+		Storage:   storage,
+		Data:      map[string]interface{}{"ciphertext": ciphertext},
+	})
+	require.NoError(t, err)
+	require.False(t, resp != nil && resp.IsError(), "decrypt: %#v", resp)
+	pt, ok := resp.Data["plaintext"].(string)
+	require.True(t, ok)
+	return pt
+}
+
+func mlkemKemSize(keyType string) int {
+	if keyType == "ml-kem-1024" {
+		return mlkem.CiphertextSize1024
+	}
+	return mlkem.CiphertextSize768
+}
 
 // TestTransit_MLKEMSanity is a quick create/read/encrypt/decrypt check with the
 // VAULT_TRANSIT_ENABLE_MLKEM feature flag enabled. Full flag matrix coverage is
@@ -254,4 +315,73 @@ func TestTransit_MLKEMFeatureFlag(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, aesResp != nil && aesResp.IsError(), "aes create: %#v", aesResp)
 	})
+}
+
+// TestTransit_MLKEMEncryptDecryptRoundTrip covers transit encrypt/decrypt for
+// empty/short/1KB/UTF-8 plaintexts, vault:v1: prefix, nondeterminism, and batch.
+func TestTransit_MLKEMEncryptDecryptRoundTrip(t *testing.T) {
+	mlkemEnableFlag(t)
+
+	plaintexts := map[string][]byte{
+		"empty": {},
+		"short": []byte("hi"),
+		"1KB":   bytesRepeat('a', 1024),
+		"utf8":  []byte("héllo 世界 🔐"),
+	}
+
+	for _, keyType := range []string{"ml-kem-768", "ml-kem-1024"} {
+		t.Run(keyType, func(t *testing.T) {
+			b, storage := createBackendWithStorage(t)
+			mlkemCreate(t, b, storage, "rt", keyType, nil)
+
+			for name, pt := range plaintexts {
+				t.Run("roundtrip/"+name, func(t *testing.T) {
+					ptB64 := base64.StdEncoding.EncodeToString(pt)
+					ct := mlkemEncrypt(t, b, storage, "rt", ptB64)
+					require.True(t, strings.HasPrefix(ct, "vault:v1:"))
+					require.Equal(t, ptB64, mlkemDecrypt(t, b, storage, "rt", ct))
+				})
+			}
+
+			t.Run("nondeterministic", func(t *testing.T) {
+				ptB64 := base64.StdEncoding.EncodeToString([]byte("same"))
+				ct1 := mlkemEncrypt(t, b, storage, "rt", ptB64)
+				ct2 := mlkemEncrypt(t, b, storage, "rt", ptB64)
+				require.True(t, strings.HasPrefix(ct1, "vault:v1:"))
+				require.True(t, strings.HasPrefix(ct2, "vault:v1:"))
+				require.NotEqual(t, ct1, ct2)
+			})
+
+			t.Run("batch", func(t *testing.T) {
+				pt1 := base64.StdEncoding.EncodeToString([]byte("batch-one"))
+				pt2 := base64.StdEncoding.EncodeToString([]byte("batch-two"))
+				resp, err := b.HandleRequest(context.Background(), &logical.Request{
+					Path:      "encrypt/rt",
+					Operation: logical.UpdateOperation,
+					Storage:   storage,
+					Data: map[string]interface{}{
+						"batch_input": []interface{}{
+							map[string]interface{}{"plaintext": pt1, "reference": "a"},
+							map[string]interface{}{"plaintext": pt2, "reference": "b"},
+						},
+					},
+				})
+				require.NoError(t, err)
+				require.False(t, resp != nil && resp.IsError(), "batch encrypt: %#v", resp)
+				results, ok := resp.Data["batch_results"].([]EncryptBatchResponseItem)
+				require.True(t, ok)
+				require.Len(t, results, 2)
+				require.Equal(t, pt1, mlkemDecrypt(t, b, storage, "rt", results[0].Ciphertext))
+				require.Equal(t, pt2, mlkemDecrypt(t, b, storage, "rt", results[1].Ciphertext))
+			})
+		})
+	}
+}
+
+func bytesRepeat(b byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
 }
