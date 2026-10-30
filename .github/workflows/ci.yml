@@ -492,6 +492,14 @@ jobs:
           what_to_do=${what_to_do//'%'/'%25'}
           echo "::error title=Go modules aren't tidy::${what_to_do//$'\n'/%0A}"
           exit 1
+      - name: Verify deprecated MSSQL driver removal
+        if: ${{ !cancelled() && steps.install-tools.outcome == 'success' }}
+        run: |
+          if grep -rn denisenkom --include='*.go' --include='go.mod' --include='go.sum' .; then
+            echo "::error::denisenkom/go-mssqldb found; use github.com/microsoft/go-mssqldb"
+            exit 1
+          fi
+          echo "No denisenkom references found."
       - name: Check that published Go modules build with this branch
         # Published modules are tested against the released versions of the workspace modules they
         # require, which is what their importers get. Build them, and compile their tests, against
