@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	mssqldb "github.com/denisenkom/go-mssqldb"
+	mssqldb "github.com/microsoft/go-mssqldb"
 	"github.com/hashicorp/go-uuid"
 	mssqlhelper "github.com/hashicorp/vault/helper/testhelpers/mssql"
 	"github.com/hashicorp/vault/sdk/database/dbplugin/v5"

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/denisenkom/go-mssqldb"
+	_ "github.com/microsoft/go-mssqldb"
 	log "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-uuid"
 	mssqlhelper "github.com/hashicorp/vault/helper/testhelpers/mssql"

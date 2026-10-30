@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"strings"
 
-	_ "github.com/denisenkom/go-mssqldb"
+	_ "github.com/microsoft/go-mssqldb"
 	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-secure-stdlib/parseutil"
 	"github.com/hashicorp/go-secure-stdlib/strutil"

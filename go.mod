@@ -83,7 +83,6 @@ require (
 	github.com/cockroachdb/cockroach-go/v2 v2.4.0
 	github.com/coder/websocket v1.8.14
 	github.com/coreos/go-systemd v0.0.0-20191104093116-d3cd4ed1dbcf
-	github.com/denisenkom/go-mssqldb v0.12.3
 	github.com/duosecurity/duo_api_golang v0.0.0-20250430191550-ac36954387e7
 	github.com/dustin/go-humanize v1.0.1
 	github.com/fatih/structs v1.1.0
@@ -194,6 +193,7 @@ require (
 	github.com/klauspost/compress v1.19.1
 	github.com/kr/pretty v0.3.1
 	github.com/michaelklishin/rabbit-hole/v2 v2.12.0
+	github.com/microsoft/go-mssqldb v1.9.8
 	github.com/miekg/dns v1.1.73
 	github.com/mikesmitty/edkey v0.0.0-20170222072505-3356ea4e686a
 	github.com/mitchellh/copystructure v1.2.0

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	mssql "github.com/denisenkom/go-mssqldb"
+	mssql "github.com/microsoft/go-mssqldb"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/helper/testhelpers/minimal"
