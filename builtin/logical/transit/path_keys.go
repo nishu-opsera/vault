@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -213,9 +214,19 @@ func (b *backend) pathPolicyWrite(ctx context.Context, req *logical.Request, d *
 		polReq.KeyType = keysutil.KeyType_AES128_CBC
 	case "aes256-cbc":
 		polReq.KeyType = keysutil.KeyType_AES256_CBC
+	case "ml-kem-768":
+		polReq.KeyType = keysutil.KeyType_ML_KEM_768
+	case "ml-kem-1024":
+		polReq.KeyType = keysutil.KeyType_ML_KEM_1024
 	default:
 		return logical.ErrorResponse(fmt.Sprintf("unknown key type %v", keyType)), logical.ErrInvalidRequest
 	}
+
+	if (polReq.KeyType == keysutil.KeyType_ML_KEM_768 || polReq.KeyType == keysutil.KeyType_ML_KEM_1024) &&
+		os.Getenv(envTransitEnableMLKEM) != "true" {
+		return logical.ErrorResponse("ML-KEM key types are not enabled; set VAULT_TRANSIT_ENABLE_MLKEM=true to enable"), logical.ErrInvalidRequest
+	}
+
 	if keySize != 0 {
 		if polReq.KeyType != keysutil.KeyType_HMAC {
 			return logical.ErrorResponse(fmt.Sprintf("key_size is not valid for algorithm %v", polReq.KeyType)), logical.ErrInvalidRequest
@@ -450,7 +461,7 @@ func (b *backend) formatKeyPolicy(ctx context.Context, p *keysutil.Policy, conte
 			default:
 				return nil, err
 			}
-		case keysutil.KeyType_ECDSA_P256, keysutil.KeyType_ECDSA_P384, keysutil.KeyType_ECDSA_P521, keysutil.KeyType_ED25519, keysutil.KeyType_RSA2048, keysutil.KeyType_RSA3072, keysutil.KeyType_RSA4096, keysutil.KeyType_ML_DSA, keysutil.KeyType_HYBRID, keysutil.KeyType_SLH_DSA:
+		case keysutil.KeyType_ECDSA_P256, keysutil.KeyType_ECDSA_P384, keysutil.KeyType_ECDSA_P521, keysutil.KeyType_ED25519, keysutil.KeyType_RSA2048, keysutil.KeyType_RSA3072, keysutil.KeyType_RSA4096, keysutil.KeyType_ML_DSA, keysutil.KeyType_HYBRID, keysutil.KeyType_SLH_DSA, keysutil.KeyType_ML_KEM_768, keysutil.KeyType_ML_KEM_1024:
 			var err error
 			asymmetricKeys[k], err = formatAsymmetricKey(p, k, v, context)
 			if err != nil {
@@ -645,8 +656,8 @@ func pathKeySharedFields() map[string]*framework.FieldSchema {
 			Default: "aes256-gcm96",
 			Description: `The type of key. Symmetric types: "aes128-gcm96", "aes256-gcm96", "chacha20-poly1305",
 "aes128-cbc", "aes256-cbc", "aes128-cmac", "aes192-cmac", "aes256-cmac". Asymmetric types: "ecdsa-p256",
-"ecdsa-p384", "ecdsa-p521", "ed25519", "rsa-2048", "rsa-3072", "rsa-4096", "ml-dsa", "slh-dsa", "hybrid".
-Defaults to "aes256-gcm96"`,
+"ecdsa-p384", "ecdsa-p521", "ed25519", "rsa-2048", "rsa-3072", "rsa-4096", "ml-dsa", "slh-dsa", "hybrid",
+"ml-kem-768", "ml-kem-1024". Defaults to "aes256-gcm96"`,
 			AllowedValues: []interface{}{
 				"aes128-gcm96", "aes256-gcm96", "chacha20-poly1305",
 				"aes128-cbc", "aes256-cbc",
@@ -655,6 +666,7 @@ Defaults to "aes256-gcm96"`,
 				"ed25519", "rsa-2048", "rsa-3072", "rsa-4096",
 				"hmac", "managed_key",
 				"ml-dsa", "slh-dsa", "hybrid",
+				"ml-kem-768", "ml-kem-1024",
 			},
 		},
 		"derived": {
@@ -866,10 +878,15 @@ are permanently deleted. Not present for hmac, managed_key, and CMAC key types.`
 	return fields
 }
 
-const pathPolicyHelpSyn = `Managed named encryption keys`
+const (
+	pathPolicyHelpSyn = `Managed named encryption keys`
 
-const pathPolicyHelpDesc = `
+	pathPolicyHelpDesc = `
 This path is used to manage the named keys that are available.
 Doing a write with no value against a new named key will create
 it using a randomly generated key.
 `
+
+	// envTransitEnableMLKEM gates creation of ML-KEM Transit key types.
+	envTransitEnableMLKEM = "VAULT_TRANSIT_ENABLE_MLKEM"
+)
