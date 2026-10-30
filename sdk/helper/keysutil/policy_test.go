@@ -39,6 +39,7 @@ var allTestKeyTypes = []KeyType{
 	KeyType_RSA4096, KeyType_ChaCha20_Poly1305, KeyType_ECDSA_P384, KeyType_ECDSA_P521, KeyType_AES128_GCM96,
 	KeyType_RSA3072, KeyType_MANAGED_KEY, KeyType_HMAC, KeyType_AES128_CMAC, KeyType_AES256_CMAC, KeyType_ML_DSA,
 	KeyType_HYBRID, KeyType_AES192_CMAC, KeyType_SLH_DSA, KeyType_AES128_CBC, KeyType_AES256_CBC,
+	KeyType_ML_KEM_768, KeyType_ML_KEM_1024,
 }
 
 func TestPolicy_KeyTypes(t *testing.T) {
@@ -106,6 +107,8 @@ func TestKeyType_KeyUsages(t *testing.T) {
 		{KeyType_RSA2048, []string{"asymmetric-encryption", "digital-signature"}},
 		{KeyType_RSA3072, []string{"asymmetric-encryption", "digital-signature"}},
 		{KeyType_RSA4096, []string{"asymmetric-encryption", "digital-signature"}},
+		{KeyType_ML_KEM_768, []string{"asymmetric-encryption"}},
+		{KeyType_ML_KEM_1024, []string{"asymmetric-encryption"}},
 		{KeyType_HMAC, []string{"message-authentication"}},
 		{KeyType_AES128_CMAC, []string{"message-authentication"}},
 		{KeyType_AES192_CMAC, []string{"message-authentication"}},

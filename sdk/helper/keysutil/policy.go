@@ -81,6 +81,8 @@ const (
 	KeyType_SLH_DSA
 	KeyType_AES128_CBC
 	KeyType_AES256_CBC
+	KeyType_ML_KEM_768
+	KeyType_ML_KEM_1024
 	// If adding to this list please update allTestKeyTypes in policy_test.go
 )
 
@@ -213,7 +215,7 @@ type KeyType int
 
 func (kt KeyType) EncryptionSupported() bool {
 	switch kt {
-	case KeyType_AES128_GCM96, KeyType_AES256_GCM96, KeyType_ChaCha20_Poly1305, KeyType_RSA2048, KeyType_RSA3072, KeyType_RSA4096, KeyType_MANAGED_KEY, KeyType_AES128_CBC, KeyType_AES256_CBC:
+	case KeyType_AES128_GCM96, KeyType_AES256_GCM96, KeyType_ChaCha20_Poly1305, KeyType_RSA2048, KeyType_RSA3072, KeyType_RSA4096, KeyType_MANAGED_KEY, KeyType_AES128_CBC, KeyType_AES256_CBC, KeyType_ML_KEM_768, KeyType_ML_KEM_1024:
 		return true
 	}
 	return false
@@ -221,7 +223,7 @@ func (kt KeyType) EncryptionSupported() bool {
 
 func (kt KeyType) DecryptionSupported() bool {
 	switch kt {
-	case KeyType_AES128_GCM96, KeyType_AES256_GCM96, KeyType_ChaCha20_Poly1305, KeyType_RSA2048, KeyType_RSA3072, KeyType_RSA4096, KeyType_MANAGED_KEY, KeyType_AES128_CBC, KeyType_AES256_CBC:
+	case KeyType_AES128_GCM96, KeyType_AES256_GCM96, KeyType_ChaCha20_Poly1305, KeyType_RSA2048, KeyType_RSA3072, KeyType_RSA4096, KeyType_MANAGED_KEY, KeyType_AES128_CBC, KeyType_AES256_CBC, KeyType_ML_KEM_768, KeyType_ML_KEM_1024:
 		return true
 	}
 	return false
@@ -289,6 +291,8 @@ func (kt KeyType) KeyUsages() []string {
 		return []string{"digital-signature"}
 	case KeyType_RSA2048, KeyType_RSA3072, KeyType_RSA4096:
 		return []string{"asymmetric-encryption", "digital-signature"}
+	case KeyType_ML_KEM_768, KeyType_ML_KEM_1024:
+		return []string{"asymmetric-encryption"}
 	case KeyType_HMAC, KeyType_AES128_CMAC, KeyType_AES192_CMAC, KeyType_AES256_CMAC:
 		return []string{"message-authentication"}
 	case KeyType_MANAGED_KEY:
@@ -366,6 +370,10 @@ func (kt KeyType) String() string {
 		return "aes128-cbc"
 	case KeyType_AES256_CBC:
 		return "aes256-cbc"
+	case KeyType_ML_KEM_768:
+		return "ml-kem-768"
+	case KeyType_ML_KEM_1024:
+		return "ml-kem-1024"
 	}
 
 	return "[unknown]"
